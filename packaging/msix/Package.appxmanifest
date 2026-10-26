@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ROG Select — Gaming Home MSIX manifest TEMPLATE — UNVERIFIED.
+  DO NOT treat this file as a working Gaming Home package until it has
+  been built with MakeAppx, signed, installed on the actual ROG Xbox
+  Ally X, and shown in Settings > Gaming > Full Screen Experience
+  (or Xbox mode) as a selectable home app.
+
+  What this template is based on (see ROG-INSTALL.md §6 for sources):
+  - Playnite-FSE-Launcher: a sideloaded MSIX using the windows.gamingApp
+    extension so Windows lists it in the FSE Settings dropdown, with a
+    .SCCD file declaring Microsoft.appCategory.gamingHome_8wekyb3d8bbwe.
+  - FullScreenExperienceShell: a native Gaming Home proof-of-concept
+    using the same windows.gamingApp AppExtension contract plus a
+    custom capability for gaming-home integration.
+  - AnyFSE: its installer enables Developer Mode, installs a temporary
+    certificate to Trusted People, installs the package, then removes
+    the certificate and turns Developer Mode back off.
+
+  What MUST be replaced / validated on device before use:
+  1. Identity Name and Publisher. Publisher MUST match the signing
+     certificate's subject exactly, or installation will fail.
+     "CN=ROG Select (Developer, Unverified)" below is a placeholder.
+  2. The exact <Extension> child elements for windows.gamingApp.
+     Copy them from a working example on device (Playnite-FSE-Launcher
+     or FullScreenExperienceShell AppxManifest) — do not guess them
+     from this template alone. If MakeAppx or Windows rejects the
+     extension, that is the first thing to fix, and the failure must
+     be reported, not worked around with a registry shell hack.
+  3. CustomCapability.SCCD in this folder. A real .SCCD file is issued
+     / authorised by the capability owner (Microsoft). This template
+     ships NO real SCCD. Without a valid SCCD, the gamingHome
+     capability will not be granted outside Developer Mode, and the
+     package may install but not appear as a home app. That outcome
+     must be reported as "MSIX Gaming Home: NOT VERIFIED", not hidden.
+  4. Entry point: this package's payload is the native rog-select.exe
+     (full-trust, Win32). It must NOT run as administrator by default,
+     and it must NOT install a service, a filter driver, or a button
+     remapper. See ROG-INSTALL.md §6 for the security rules.
+
+  Signing / install (summary only — full steps in ROG-INSTALL.md §6):
+  - Create a self-signed dev certificate, trust it (Trusted People,
+    Local Machine) — this step needs elevation, the app itself does not.
+  - Developer Mode must be on to sideload a package with a custom
+    capability outside the Store. It can be turned off after install
+    in the Playnite example; verify the same holds here before claiming it.
+  - Uninstall is a normal Store-style uninstall: Start menu >
+    Uninstall, or: Get-AppxPackage *ROGSelect* | Remove-AppxPackage
+  - Rollback to the stock Xbox home: Settings > Gaming > Full Screen
+    Experience > Choose home app > Xbox (see ROG-INSTALL.md §6).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap4 rescap">
+  <Identity
+    Name="ROGSelect"
+    Publisher="CN=ROG Select (Developer, Unverified)"
+    Version="1.0.1.0" />
+  <Properties>
+    <DisplayName>ROG Select</DisplayName>
+    <PublisherDisplayName>ROG Select (Developer)</PublisherDisplayName>
+    <Description>Lightweight native four-button Gaming Home selector for ROG Xbox Ally X. UNVERIFIED Gaming Home package - see ROG-INSTALL.md.</Description>
+    <Logo>assets\windows.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="ROGSelect" Executable="rog-select.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="ROG Select"
+        Description="ROG Select"
+        BackgroundColor="transparent"
+        Square150x150Logo="assets\windows.png"
+        Square44x44Logo="assets\windows.png" />
+      <Extensions>
+        <!--
+          TODO (device validation required): exact windows.gamingApp
+          extension children, copied from a working Gaming Home example.
+          Do not ship this manifest as "working" until Windows lists
+          ROG Select in the home-app dropdown after installing it.
+        -->
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="windows.gamingApp" Id="ROGSelect" PublicFolder="Public" DisplayName="ROG Select" Description="ROG Select Gaming Home" />
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <!--
+      Gaming Home custom capability, as used by Playnite-FSE-Launcher
+      and AnyFSE. Requires a valid CustomCapability.SCCD (see header).
+      Without it, this capability is not granted outside Developer Mode.
+    -->
+    <uap4:CustomCapability Name="Microsoft.appCategory.gamingHome_8wekyb3d8bbwe" />
+  </Capabilities>
+</Package>

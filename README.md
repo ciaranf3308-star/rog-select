@@ -22,13 +22,21 @@ Design target: the supplied hero image (`ROG SELECT — Choose your destination`
 
 **It is NOT verified that this selector preserves Xbox Mode's Windows background-process optimisations, and this README does not claim that it does.**
 
-Xbox Full Screen Experience / Gaming Home integration goes through Microsoft's Gaming Home mechanism (AnyFSE is the community route people point at first). Whether ROG Select can be registered that way, whether it keeps the same background-process behaviour as the stock Xbox dashboard, and whether Armoury Crate / ASUS power modes behave identically under it, can only be established by testing on the actual Ally X.
+Xbox Mode (Full Screen Experience, FSE) is a Windows session posture, not a theme: when a supported gaming home app is chosen in Settings > Gaming > Xbox mode / Full Screen Experience, Windows starts that home app, suppresses the taskbar, some startup apps and other components, and — with "Enter Xbox mode on startup" — limits background processes to improve gaming performance. Microsoft's own docs put the exit routes as Game Bar settings, Task View, or Win+F11, and warn that re-entering Xbox mode after a desktop visit prompts for a restart to regain the startup optimisations.
 
-Until that test is done and logged:
+ROG Select's integration path is therefore, in order:
+
+1. **Preferred: native Gaming Home registration via MSIX** — a package using the `windows.gamingApp` extension and the `Microsoft.appCategory.gamingHome_8wekyb3d8bbwe` custom capability (with a valid `.SCCD`), as demonstrated by Playnite-FSE-Launcher and FullScreenExperienceShell. A template manifest is in `packaging/msix/` — it is **unverified** until it is built, signed, installed on the Ally X, and actually appears in the home-app dropdown.
+2. **Fallback bridge: AnyFSE** — AnyFSE as home app, with its custom-executable feature pointing at `rog-select.exe`, button remapping OFF. AnyFSE's own flow starts the launcher, waits for its main window, then closes its splash and exits, so ROG Select does not depend on a permanently running bridge. Do not enable AnyFSE's ASUS button remapping / ACSE Filter service for ROG Select — that is DLL injection into ASUS Optimization, and it is out of scope for this project.
+3. **If neither works:** a plain fullscreen app launched optionally at startup. That is *not* Xbox Mode, and must not be described as such.
+
+Until the on-device checks in `ROG-INSTALL.md §6` pass and are logged:
 
 - Treat ROG Select as a **fullscreen selector app you launch (optionally at startup)**, not as a proven Gaming Home replacement.
-- Do not present it to anyone else as "Xbox Mode, but with a better menu" until the on-device checks in `ROG-INSTALL.md` pass.
-- If Gaming Home registration fails, the safe fallback is the stock Xbox Full Screen Experience (see Rollback below) — not a shell hack.
+- Do not present it to anyone else as "Xbox Mode, but with a better menu".
+- If Gaming Home registration fails, the safe fallback is the stock Xbox Full Screen Experience (see Rollback below) — not a shell hack, not a registry shell change, not a service.
+
+The app itself now detects FSE at startup and on the Windows button via `IsGamingFullScreenExperienceActive()` (SDK 10.0.26100.3916+, loaded dynamically; if the API set is absent, the log says UNAVAILABLE, never guessed). FSE being active does **not** prove every optimisation is still in effect after a desktop visit — that is a device test, not a return value.
 
 ## Installation (portable, no installer)
 
@@ -58,7 +66,7 @@ All paths are relative to the folder containing `rog-select.exe`, or absolute. R
 | Each card's `action` | `desktop`, `exe`, or `store_app` (Xbox). |
 | Each card's `path` | Executable, URI, or `shell:AppsFolder\<AUMID>` for the Xbox app. |
 | Each card's `arguments` | Command-line arguments, e.g. Steam's `-bigpicture`. |
-| Each card's `return_process` | Process name to watch for return-to-selector (see below). |
+| Each card's `return_process` | Legacy, ignored since v1.0.1. Return is via Game Bar Home / Task View / relaunch — no watcher runs. |
 
 **Emulation:** leave `path` blank and the button will show an error and log it — it will never guess a frontend or launch the desktop instead. Set it to your actual frontend exe.
 
@@ -72,6 +80,11 @@ and put `shell:AppsFolder\<that AUMID>` in `selector.ini`.
 
 **Sounds:** navigate = Gentle swoosh (menu moving), select = Brief metallic clang (selection). If they feel reversed on the device, swap the two `sound_*` lines in `selector.ini` — no rebuild needed.
 
+## The Windows button (gated, by design)
+
+- If Xbox Mode is **inactive**, pressing Windows quits the selector and the normal desktop underneath appears. That is a real desktop switch.
+- If Xbox Mode is **active**, pressing Windows does **not** launch `explorer.exe` and does **not** quit. It shows: *"Xbox Mode is active. Press Win+F11, or use Game Bar / Task View > Windows Desktop to switch."* Launching Explorer while FSE is still active would leave Xbox Mode active and would not guarantee optimisations return — so the app refuses to fake the switch. Whether quitting a registered Gaming Home app itself returns to desktop is a device test in ROG-INSTALL §6; until it is tested, the gated instruction is the safe behaviour.
+
 ## Controls
 
 - **Controller (XInput):** D-Pad or left stick to move, A to launch. B and Guide do nothing, deliberately — no accidental exit to desktop.
@@ -81,10 +94,12 @@ and put `shell:AppsFolder\<that AUMID>` in `selector.ini`.
 
 ## Returning to the selector
 
-- **Direct exe launches (Emulation, Steam when not already running):** the selector hides, waits for the launched process to exit, then reappears fullscreen.
-- **Steam when already running:** the selector watches for `steam.exe` to exit. Closing Big Picture alone while Steam stays in the tray does **not** yet bring the selector back — exit Steam fully, or relaunch `rog-select.exe` (single-instance handling brings the hidden window back).
-- **Xbox (store app):** the selector watches for `GamingApp.exe`. If that process never appears (the URI forwards elsewhere), the selector stays hidden rather than popping over the Xbox app. Relaunching `rog-select.exe` brings it back.
-- **Windows:** the selector quits. That *is* the switch to desktop — there is nothing to return from, by design. Relaunch the exe to get the selector back.
+There is **no background watcher** in v1.0.1+. An earlier version waited for a child process to exit; that polling monitor could pop the selector over a launched app when a launcher forwards to an already-running process, and it is not how FSE is meant to work.
+
+- **After any launch:** the selector hides and stays hidden. Nothing polls, nothing watches.
+- **Return via the system's own surfaces:** Game Bar Home (Win+G / Xbox button, then Home), Task View (Win+Tab, long-press Xbox button, or swipe up on touch), or relaunching `rog-select.exe` — single-instance handling shows the hidden window.
+- **Xbox:** opening the Xbox PC app is **not** the same as restoring the original Xbox home experience. Test both on device (ROG-INSTALL §6).
+- **Windows:** see below — this button is now gated when Xbox Mode is active.
 
 ## Logging and fallback
 
@@ -140,4 +155,5 @@ assets/select.mp3            Confirm sound
 build.bat                    Local MSVC build
 .github/workflows/build-release.yml   CI release build + ZIP
 ROG-INSTALL.md               Precise on-device steps for Codex
+packaging/msix/              UNVERIFIED Gaming Home MSIX template + signing notes
 ```

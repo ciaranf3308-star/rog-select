@@ -29,8 +29,7 @@
 #pragma comment(lib, "Xinput.lib")
 #pragma comment(lib, "winmm.lib")
 
-#define WM_RESTORE_SELECTOR (WM_USER + 100)
-#define WM_SHOW_SELECTOR    (WM_USER + 100 + 1)
+#define WM_SHOW_SELECTOR    (WM_USER + 100)
 #define TIMER_CONTROLLER 1
 
 static HWND g_hwnd = nullptr;
@@ -111,16 +110,45 @@ static void Log(const std::string& msg) {
     if (f) f << line;
 }
 static bool ProcessExists(const std::string& exeName) {
+    // Wide version only: PROCESSENTRY32A / Process32FirstA failed to compile
+    // on the GitHub MSVC runner (SDK 10.0.26100, VS 18). The W API is the
+    // same snapshot walk, with a wide exe name.
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32A pe; pe.dwSize = sizeof(pe);
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+    std::wstring want = ToWide(exeName);
     bool found = false;
-    if (Process32FirstA(snap, &pe)) {
-        do { if (_stricmp(pe.szExeFile, exeName.c_str()) == 0) { found = true; break; } }
-        while (Process32NextA(snap, &pe));
+    if (Process32FirstW(snap, &pe)) {
+        do { if (_wcsicmp(pe.szExeFile, want.c_str()) == 0) { found = true; break; } }
+        while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
     return found;
+}
+// Xbox Mode / Full Screen Experience detection.
+// Microsoft GDK guidance: call IsGamingFullScreenExperienceActive() from
+// <gamingexperience.h>, linked via windowsapp.lib, SDK 10.0.26100.3916+,
+// guarded by IsApiSetImplemented("api-ms-win-gaming-experience-l1-1-0").
+// This app is a classic Win32 exe, so it loads the API set dynamically:
+// if the API set is absent (older Windows, non-handheld build), FSE state
+// is reported as UNAVAILABLE, never guessed. FSE active does NOT prove
+// that every optimisation is still in effect after a desktop visit -
+// that is a device test, not a return value.
+typedef BOOL (WINAPI* PFN_IsFSEActive)(void);
+static bool QueryFse(bool* available) {
+    *available = false;
+    HMODULE h = LoadLibraryA("api-ms-win-gaming-experience-l1-1-0.dll");
+    if (!h) return false;
+    auto fn = (PFN_IsFSEActive)GetProcAddress(h, "IsGamingFullScreenExperienceActive");
+    if (!fn) return false;
+    *available = true;
+    return fn() != FALSE;
+}
+static void LogFseState(const char* when) {
+    bool avail = false;
+    bool active = QueryFse(&avail);
+    if (!avail) Log(std::string("FSE state (") + when + "): UNAVAILABLE - API set not present on this build");
+    else Log(std::string("FSE state (") + when + "): " + (active ? "ACTIVE" : "INACTIVE"));
 }
 static void PlayMp3(const std::string& relFile) {
     if (!g_soundEnabled) return;
@@ -348,42 +376,20 @@ static void SetFocusIndex(int idx, bool playSound) {
 }
 
 // ---------- launch / return ----------
-struct WatchInfo { HANDLE hProcess; std::string watchName; HWND hwnd; };
-static DWORD WINAPI WatchThread(LPVOID p) {
-    WatchInfo* w = (WatchInfo*)p;
-    if (w->hProcess) {
-        WaitForSingleObject(w->hProcess, INFINITE);
-        CloseHandle(w->hProcess);
-        PostMessage(w->hwnd, WM_RESTORE_SELECTOR, 0, 0);
-    } else if (!w->watchName.empty()) {
-        bool wasPresent = false;
-        int checksWithout = 0;
-        while (true) {
-            bool present = ProcessExists(w->watchName);
-            if (present) { wasPresent = true; checksWithout = 0; }
-            else if (wasPresent) { PostMessage(w->hwnd, WM_RESTORE_SELECTOR, 0, 0); break; }
-            else if (++checksWithout >= 15) {
-                // Target never appeared (e.g. URI forwarded elsewhere).
-                // Stay hidden rather than popping over the launched app.
-                // The user can bring the selector back by launching it again
-                // (single-instance handling shows the hidden window).
-                Log("Watch process never appeared, staying hidden: " + w->watchName);
-                break;
-            }
-            Sleep(2000);
-        }
-    } else {
-        Log("No watch handle/process for this launch; selector stays hidden until relaunched.");
-    }
-    delete w;
-    return 0;
-}
-static void HideAndWatch(HANDLE hProcess, const std::string& watchName) {
+// Deliberately NO background watcher thread. Earlier versions waited for a
+// child process to exit and then restored the selector. That is a polling
+// monitor, it can pop the selector over the launched app when a launcher
+// forwards to an already-running process (Steam, Xbox), and it is not how
+// FSE is meant to work. In FSE, return is via the system's own surfaces:
+// Game Bar Home (Win+G / Xbox button, then Home), Task View (Win+Tab,
+// long-press Xbox button, swipe up on touch), or relaunching this exe,
+// whose single-instance handling shows the hidden window. The selector
+// therefore hides on launch and does nothing else until the user brings
+// it back through one of those routes. No thread, no snapshot polling,
+// no service. selector.ini return_process is now ignored (legacy only).
+static void HideSelectorOnly() {
     ShowWindow(g_hwnd, SW_HIDE);
-    WatchInfo* w = new WatchInfo{ hProcess, watchName, g_hwnd };
-    HANDLE th = CreateThread(nullptr, 0, WatchThread, w, 0, nullptr);
-    if (th) CloseHandle(th);
-    else { delete w; Log("Failed to start return watcher"); }
+    Log("Selector hidden after launch. Return via Game Bar Home, Task View, or relaunching rog-select.exe.");
 }
 static std::string FindSteam() {
     const char* candidates[] = {
@@ -405,10 +411,28 @@ static void LaunchEntry(int idx) {
     Log("Launch: " + en.label + " action=" + en.action + " path=" + en.path);
     g_status.clear();
     if (en.action == "desktop") {
-        // Proper switch to the normal desktop: the selector is a fullscreen
-        // window over the shell. If Explorer is not running, start it first
-        // so quitting does not leave a black screen. Explorer is never
-        // replaced and no shell registry value is touched.
+        // Real desktop transition, not a fake one. Microsoft's FSE docs:
+        // exit Xbox mode via Game Bar settings, Task View, or Win+F11;
+        // on handhelds with "Enter Xbox mode on startup", re-entering after
+        // a desktop visit prompts for a restart to regain the startup
+        // optimisations. Merely launching explorer.exe while FSE is still
+        // active would leave Xbox Mode active and would NOT be a proper
+        // switch, and it would not guarantee optimisations return.
+        // So: if FSE is inactive, quitting here IS the desktop switch
+        // (Explorer is the shell underneath; it is never replaced).
+        // If FSE is active, do NOT launch explorer and do NOT quit:
+        // show the official exit route and let the user take it. That
+        // behaviour, and whether quitting a registered Gaming Home app
+        // itself returns to desktop, is a device test (ROG-INSTALL §6).
+        LogFseState("Windows button");
+        bool avail = false;
+        bool active = QueryFse(&avail);
+        if (avail && active) {
+            g_status = "Xbox Mode is active. Press Win+F11, or use Game Bar / Task View > Windows Desktop to switch. Explorer alone does not exit Xbox Mode.";
+            Log("Windows requested while FSE active: instructed user to use Win+F11 / Game Bar / Task View, explorer NOT launched");
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+            return;
+        }
         if (!ProcessExists("explorer.exe")) {
             STARTUPINFOA si = { sizeof(si) }; PROCESS_INFORMATION pi = {};
             if (CreateProcessA("C:\\Windows\\explorer.exe", nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
@@ -442,7 +466,8 @@ static void LaunchEntry(int idx) {
             return;
         }
         CloseHandle(pi.hThread);
-        HideAndWatch(pi.hProcess, en.returnProcess);
+        CloseHandle(pi.hProcess);
+        HideSelectorOnly();
         return;
     }
     if (en.action == "uri" || en.action == "store_app") {
@@ -458,7 +483,7 @@ static void LaunchEntry(int idx) {
             InvalidateRect(g_hwnd, nullptr, FALSE);
             return;
         }
-        HideAndWatch(nullptr, en.returnProcess);
+        HideSelectorOnly();
         return;
     }
     g_status = "Unknown action for " + en.label + " in selector.ini.";
@@ -542,12 +567,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (card >= 0) { SetFocusIndex(card, false); LaunchEntry(card); }
         return 0;
     }
-    case WM_RESTORE_SELECTOR:
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        Log("Returned to selector");
-        return 0;
     case WM_SHOW_SELECTOR:
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
@@ -582,6 +601,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     }
     Log("ROG Select starting");
     LoadConfig();
+    LogFseState("startup");
     // Single instance: a second launch shows the existing window.
     HANDLE mutex = CreateMutexA(nullptr, FALSE, "ROGSelectSingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
