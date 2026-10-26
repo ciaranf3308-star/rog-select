@@ -10,7 +10,7 @@ if not defined VCINSTALLDIR (
     call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat" x64
   )
 )
-cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE src\main.cpp /link d2d1.lib windowscodecs.lib dwrite.lib Xinput.lib winmm.lib user32.lib gdi32.lib shell32.lib /OUT:rog-select.exe
+cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE src\main.cpp /link d2d1.lib windowscodecs.lib dwrite.lib Xinput.lib winmm.lib user32.lib gdi32.lib shell32.lib ole32.lib /OUT:rog-select.exe
 if errorlevel 1 (
   echo BUILD FAILED - see the errors above.
   exit /b 1

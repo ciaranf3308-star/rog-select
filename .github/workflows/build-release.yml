@@ -21,7 +21,7 @@ jobs:
       - name: Compile (MSVC, no dependencies to download)
         shell: cmd
         run: |
-          cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE src\main.cpp /link d2d1.lib windowscodecs.lib dwrite.lib Xinput.lib winmm.lib user32.lib gdi32.lib shell32.lib /OUT:rog-select.exe
+          cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE src\main.cpp /link d2d1.lib windowscodecs.lib dwrite.lib Xinput.lib winmm.lib user32.lib gdi32.lib shell32.lib ole32.lib /OUT:rog-select.exe
 
       - name: Stage portable folder
         shell: pwsh

@@ -126,7 +126,7 @@ Locally on Windows (Developer Command Prompt, or just run the script):
 ```
 build.bat
 ```
-That produces `rog-select.exe` in the repo folder. No packages to download — it links only Windows system libraries (`d2d1`, `windowscodecs`, `dwrite`, `Xinput`, `winmm`, `user32`, `gdi32`, `shell32`).
+That produces `rog-select.exe` in the repo folder. No packages to download — it links only Windows system libraries (`d2d1`, `windowscodecs`, `dwrite`, `Xinput`, `winmm`, `user32`, `gdi32`, `shell32`, `ole32` for COM/WIC).
 
 ## Rollback (full, in under a minute)
 
