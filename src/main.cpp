@@ -1,4 +1,4 @@
-// ROG Select 1.0.0 - lightweight native Windows boot selector
+// ROG Select 1.0.3 - lightweight native Windows boot selector
 // Win32 + Direct2D + WIC + DirectWrite + XInput + MCI (MP3).
 // No Electron, browser, Python, web server, service, telemetry,
 // library scanning, auto-update, shell replacement, or DLL injection.
@@ -39,6 +39,8 @@ static bool g_windowed = false;
 static int g_focus = 1; // 0 Windows, 1 Emulation, 2 Xbox, 3 Steam (hero default)
 static std::string g_status;
 static bool g_soundEnabled = true;
+static bool g_exitOnLaunch = false; // Test flag only, default off (see selector.ini).
+static bool g_timerActive = false;
 
 static ID2D1Factory* g_factory = nullptr;
 static ID2D1HwndRenderTarget* g_target = nullptr;
@@ -199,6 +201,7 @@ static void LoadConfig() {
     get("general", "sound_select", g_selectFile);
     { std::string v; get("general", "default_focus", v); if (!v.empty()) { int f = atoi(v.c_str()); if (f >= 0 && f <= 3) g_focus = f; } }
     { std::string v; get("general", "sound", v); if (Lower(v) == "off" || v == "0") g_soundEnabled = false; }
+    { std::string v; get("general", "exit_on_launch", v); if (Lower(v) == "on" || v == "1" || Lower(v) == "true") g_exitOnLaunch = true; }
     for (auto& en : g_entries) {
         get(en.id, "label", en.label);
         get(en.id, "image", en.imageFile);
@@ -387,9 +390,47 @@ static void SetFocusIndex(int idx, bool playSound) {
 // therefore hides on launch and does nothing else until the user brings
 // it back through one of those routes. No thread, no snapshot polling,
 // no service. selector.ini return_process is now ignored (legacy only).
+// v1.0.3: controller polling stops when the selector is hidden, so a
+// hidden selector costs no timer wake-ups at all. The message loop
+// already blocks, so with the timer stopped the hidden process is
+// idle (no CPU, no painting, no polling) until it is shown again.
+static void StartControllerTimer() {
+    if (g_hwnd && !g_timerActive) {
+        SetTimer(g_hwnd, TIMER_CONTROLLER, 80, nullptr);
+        g_timerActive = true;
+    }
+}
+static void StopControllerTimer() {
+    if (g_hwnd && g_timerActive) {
+        KillTimer(g_hwnd, TIMER_CONTROLLER);
+        g_timerActive = false;
+    }
+}
 static void HideSelectorOnly() {
+    StopControllerTimer();
     ShowWindow(g_hwnd, SW_HIDE);
-    Log("Selector hidden after launch. Return via Game Bar Home, Task View, or relaunching rog-select.exe.");
+    Log("Selector hidden after launch, controller polling stopped. Return via Game Bar Home, Task View, or relaunching rog-select.exe.");
+}
+// Terminate-entirely option, investigated for v1.0.3 and kept behind a
+// config flag for a device test (see selector.ini). Microsoft's own
+// GDK launcher guidance says: after a launcher successfully launches
+// a game, consider terminating the launcher (or at least minimising
+// its resources) to give the game more resources. Playnite-FSE and
+// AnyFSE both exit after handing off. Terminating gives 0 CPU and
+// 0 RAM for the selector, but return then depends entirely on
+// Windows Gaming Home relaunching the home app (Game Bar Home) or
+// on manually relaunching the exe — neither is verified on this
+// device yet, so exit_on_launch stays OFF by default. If Codex
+// confirms Game Bar Home reliably relaunches ROG Select after an
+// exit_on_launch launch, that flag can become the default in a
+// later small update. It is NOT the default in v1.0.3.
+static void HideOrExitAfterLaunch() {
+    if (g_exitOnLaunch) {
+        Log("exit_on_launch=1: selector exiting entirely after launch (no hidden process, no polling). Return depends on Gaming Home relaunch or manual relaunch.");
+        PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+    } else {
+        HideSelectorOnly();
+    }
 }
 static std::string FindSteam() {
     const char* candidates[] = {
@@ -411,13 +452,17 @@ static void LaunchEntry(int idx) {
     Log("Launch: " + en.label + " action=" + en.action + " path=" + en.path);
     g_status.clear();
     if (en.action == "desktop") {
-        // Real desktop transition, not a fake one. Microsoft's FSE docs:
-        // exit Xbox mode via Game Bar settings, Task View, or Win+F11;
-        // on handhelds with "Enter Xbox mode on startup", re-entering after
-        // a desktop visit prompts for a restart to regain the startup
-        // optimisations. Merely launching explorer.exe while FSE is still
-        // active would leave Xbox Mode active and would NOT be a proper
-        // switch, and it would not guarantee optimisations return.
+        // Real desktop transition, not a fake one. v1.0.3 investigation:
+        // no supported programmatic method was found to exit FSE /
+        // switch to desktop from an app. Microsoft's FSE docs list only
+        // user actions: Game Bar settings, Task View > Windows Desktop
+        // > Continue, swipe up on touch, or Win+F11. There is no
+        // "exit FSE" API alongside IsGamingFullScreenExperienceActive().
+        // Deliberately NOT used: SendInput Win+F11 simulation, registry
+        // changes, and explorer.exe launch while FSE is active — all
+        // could break Xbox Mode and are forbidden for this project.
+        // So the manual instruction is retained, not delayed for a
+        // solution that does not exist in a supported form.
         // So: if FSE is inactive, quitting here IS the desktop switch
         // (Explorer is the shell underneath; it is never replaced).
         // If FSE is active, do NOT launch explorer and do NOT quit:
@@ -428,7 +473,7 @@ static void LaunchEntry(int idx) {
         bool avail = false;
         bool active = QueryFse(&avail);
         if (avail && active) {
-            g_status = "Xbox Mode is active. Press Win+F11, or use Game Bar / Task View > Windows Desktop to switch. Explorer alone does not exit Xbox Mode.";
+            g_status = "Xbox Mode active. Press Win+F11, or Task View > Windows Desktop > Continue. No app can switch you directly - see ROG-INSTALL.";
             Log("Windows requested while FSE active: instructed user to use Win+F11 / Game Bar / Task View, explorer NOT launched");
             InvalidateRect(g_hwnd, nullptr, FALSE);
             return;
@@ -467,7 +512,7 @@ static void LaunchEntry(int idx) {
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        HideSelectorOnly();
+        HideOrExitAfterLaunch();
         return;
     }
     if (en.action == "uri" || en.action == "store_app") {
@@ -483,7 +528,7 @@ static void LaunchEntry(int idx) {
             InvalidateRect(g_hwnd, nullptr, FALSE);
             return;
         }
-        HideSelectorOnly();
+        HideOrExitAfterLaunch();
         return;
     }
     g_status = "Unknown action for " + en.label + " in selector.ini.";
@@ -521,7 +566,13 @@ static void PollController() {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        SetTimer(hwnd, TIMER_CONTROLLER, 80, nullptr);
+        StartControllerTimer();
+        return 0;
+    case WM_SHOWWINDOW:
+        // ShowWindow(SW_HIDE) / SW_SHOW both arrive here. Stop polling
+        // on hide, resume on show. This is the v1.0.3 idle fix: a hidden
+        // selector has no timer wake-ups at all.
+        if (wParam) StartControllerTimer(); else StopControllerTimer();
         return 0;
     case WM_TIMER:
         if (wParam == TIMER_CONTROLLER) PollController();
@@ -569,11 +620,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_SHOW_SELECTOR:
         ShowWindow(hwnd, SW_SHOW);
+        StartControllerTimer();
         SetForegroundWindow(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_DESTROY:
-        KillTimer(hwnd, TIMER_CONTROLLER);
+        StopControllerTimer();
         mciSendStringA("close rogselect_sound", nullptr, 0, nullptr);
         DiscardDeviceResources();
         PostQuitMessage(0);

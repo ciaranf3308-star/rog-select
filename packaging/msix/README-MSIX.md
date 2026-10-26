@@ -1,6 +1,6 @@
 # MSIX Gaming Home packaging — UNVERIFIED template
 
-This folder is a starting point for the preferred native route, not a finished installer. Read `ROG-INSTALL.md §6` before touching it.
+This folder is a starting point for the preferred native route, not a finished installer. v1.0.3 defers it: the first device test uses the AnyFSE bridge in ROG-INSTALL Step 3. Do not build or test this package in the first test.
 
 ## What is here
 

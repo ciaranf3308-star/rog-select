@@ -16,7 +16,7 @@ Design target: the supplied hero image (`ROG SELECT — Choose your destination`
 - **Native C++ only.** One Win32 + Direct2D source file (`src/main.cpp`). No Electron, browser engine, Python runtime, or web server.
 - **No background service, no telemetry, no library scanning, no automatic updates.** The app does one thing: show four buttons, launch one thing, and come back when that thing exits (see limitations below).
 - **No system changes.** It does not modify Windows system files, does not replace Explorer as the system shell, does not disable Defender or any security protection, and does not install controller remapping or DLL-injection services.
-- **Idle cost is effectively zero.** The message loop blocks (`GetMessage`). The only wake-up is an 80 ms XInput poll, and painting happens only on focus change, resize, launch, or return.
+- **Idle cost is effectively zero, including when hidden.** The message loop blocks (`GetMessage`). While visible, the only wake-up is an 80 ms XInput poll, and painting happens only on focus change, resize, launch, or return. In v1.0.3, that timer is stopped when the selector hides after a launch and resumed when it is shown again — a hidden selector has no timer wake-ups at all. There is no watcher thread, service, or extra process. An optional `exit_on_launch=on` test flag (selector.ini, off by default) exits the selector entirely after a launch for 0 CPU / 0 RAM; see ROG-INSTALL for the device test that must pass before it becomes the default.
 
 ## Xbox Mode — read this first, honestly
 
@@ -83,7 +83,7 @@ and put `shell:AppsFolder\<that AUMID>` in `selector.ini`.
 ## The Windows button (gated, by design)
 
 - If Xbox Mode is **inactive**, pressing Windows quits the selector and the normal desktop underneath appears. That is a real desktop switch.
-- If Xbox Mode is **active**, pressing Windows does **not** launch `explorer.exe` and does **not** quit. It shows: *"Xbox Mode is active. Press Win+F11, or use Game Bar / Task View > Windows Desktop to switch."* Launching Explorer while FSE is still active would leave Xbox Mode active and would not guarantee optimisations return — so the app refuses to fake the switch. Whether quitting a registered Gaming Home app itself returns to desktop is a device test in ROG-INSTALL §6; until it is tested, the gated instruction is the safe behaviour.
+- If Xbox Mode is **active**, pressing Windows does **not** launch `explorer.exe` and does **not** quit. It shows: *"Xbox Mode active. Press Win+F11, or Task View > Windows Desktop > Continue."* v1.0.3 investigated a direct, supported desktop switch and found none: Microsoft documents only user actions (Game Bar, Task View, Win+F11, swipe up) and provides no "exit FSE" API. Simulated shortcuts, registry changes, and Explorer hacks were deliberately not used, and the release was not delayed chasing an unsupported solution. Whether quitting a registered Gaming Home app itself returns to desktop is a device test in ROG-INSTALL; until it is tested, the gated instruction is the safe behaviour.
 
 ## Controls
 
