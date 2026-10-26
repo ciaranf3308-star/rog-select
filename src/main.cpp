@@ -1,4 +1,4 @@
-// ROG Select 1.0.6 - lightweight native Windows boot selector
+// ROG Select 1.0.7 - lightweight native Windows boot selector
 // Win32 + Direct2D + WIC + DirectWrite + XInput + MCI (MP3).
 // No Electron, browser, Python, web server, service, telemetry,
 // library scanning, auto-update, shell replacement, or DLL injection.
@@ -16,6 +16,7 @@
 #include <mmsystem.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
+#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -28,10 +29,13 @@
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "Xinput.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "winhttp.lib")
 
 #define WM_SHOW_SELECTOR    (WM_USER + 100)
+#define WM_UPDATE_READY     (WM_USER + 101)
 #define TIMER_CONTROLLER 1
 #define TIMER_TRANSITION 2
+#define TIMER_UPDATE 3
 // Desktop transition: poll every 250 ms, max 10 s. Device tests showed
 // ACTIVE -> INACTIVE in ~1 s and ~5 s, so 10 s is bounded but generous.
 // No retry, no second SendInput on timeout (that would toggle back).
@@ -43,6 +47,11 @@ static bool g_windowed = false;
 static int g_focus = 1; // 0 Windows, 1 Emulation, 2 Xbox, 3 Steam (hero default)
 static std::string g_status;
 static bool g_soundEnabled = true;
+static const std::string kVersion = "1.0.7";
+static bool g_updateCheckEnabled = true;
+static bool g_updateReady = false;
+static bool g_updateDownloading = false;
+static std::string g_updateTag;
 static bool g_exitOnLaunch = false; // Test flag only, default off (see selector.ini).
 static bool g_timerActive = false;
 static bool g_desktopTransition = false; // Win+F11 sent, waiting for INACTIVE.
@@ -71,8 +80,14 @@ struct Entry {
 };
 static std::vector<Entry> g_entries;
 static std::string g_backgroundFile = "assets\\background.png";
-static std::string g_navigateFile = "assets\\navigate.mp3";
-static std::string g_selectFile = "assets\\select.mp3";
+// v1.0.7 sound mapping, confirmed on device: the file names are
+// the original ElevenLabs labels, but the user wants the metallic
+// clang (select.mp3) on MOVE and the gentle swoosh (navigate.mp3)
+// on SELECT. So navigate defaults to select.mp3, select to
+// navigate.mp3. See also the migration in LoadConfig for old
+// selector.ini files that still carry the original mapping.
+static std::string g_navigateFile = "assets\\select.mp3";
+static std::string g_selectFile = "assets\\navigate.mp3";
 
 // ---------- helpers ----------
 static std::string Trim(const std::string& s) {
@@ -179,6 +194,220 @@ static void LogFseState(const char* when) {
     if (!avail) Log(std::string("FSE state (") + when + "): UNAVAILABLE - API set not present on this build");
     else Log(std::string("FSE state (") + when + "): " + (active ? "ACTIVE" : "INACTIVE"));
 }
+// ---------- lightweight updater (v1.0.7) ----------
+// Design, deliberately small and safe, not a service:
+// - Check at most once per 24 h, 2 s after the window opens, via
+//   GitHub Releases (HTTPS, WinHTTP, 5 s timeouts). Offline or
+//   unreachable = log and continue, never block the selector.
+// - No silent install. If a newer tag is found, the ZIP is downloaded
+//   once in a short-lived thread (it exits after the download), then
+//   the selector only shows "Update ready - press X (or U) to
+//   install and restart, B/Esc to dismiss". Installing only happens
+//   on that explicit press, and only then does a small update.bat
+//   wait for the selector to exit, expand the ZIP with PowerShell's
+//   Expand-Archive, copy the new exe/README/ROG-INSTALL/assets over,
+//   preserve selector.ini (your paths and sound mapping stay), delete
+//   the staging folder, and relaunch rog-select.exe. If any step
+//   fails, the old exe is still there and is relaunched, so an
+//   update cannot brick the selector. No service, no background
+//   polling, no registry change, no admin required (the folder is
+//   user-owned). update_check=off in selector.ini disables it all.
+// - Version compare is numeric (1.0.10 > 1.0.9), not lexical.
+static bool ParseVersion(const std::string& v, int& maj, int& min, int& pat) {
+    maj = min = pat = 0;
+    std::string s = v;
+    if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) s = s.substr(1);
+    size_t d1 = s.find('.'), d2 = (d1 == std::string::npos ? std::string::npos : s.find('.', d1 + 1));
+    try {
+        maj = atoi(s.substr(0, d1).c_str());
+        min = (d1 == std::string::npos ? 0 : atoi(s.substr(d1 + 1, d2 == std::string::npos ? std::string::npos : d2 - d1 - 1).c_str()));
+        pat = (d2 == std::string::npos ? 0 : atoi(s.substr(d2 + 1).c_str()));
+    } catch (...) { return false; }
+    return true;
+}
+static bool IsNewerVersion(const std::string& tag) {
+    int tmaj, tmin, tpat, cmaj, cmin, cpat;
+    if (!ParseVersion(tag, tmaj, tmin, tpat) || !ParseVersion(kVersion, cmaj, cmin, cpat)) return false;
+    if (tmaj != cmaj) return tmaj > cmaj;
+    if (tmin != cmin) return tmin > cmin;
+    return tpat > cpat;
+}
+static ULONGLONG NowFileTime() {
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+    return u.QuadPart;
+}
+static bool ShouldCheckForUpdate() {
+    std::ifstream in(ToWide(g_exeDir + "\\last_update_check.txt"));
+    if (!in) return true;
+    std::string s; std::getline(in, s);
+    if (s.empty()) return true;
+    ULONGLONG last = 0;
+    try { last = std::stoull(s); } catch (...) { return true; }
+    ULONGLONG now = NowFileTime();
+    if (now < last) return true;
+    return (now - last) >= 864000000000ULL; // 24 h in 100 ns units
+}
+static void MarkUpdateChecked() {
+    std::ofstream out(ToWide(g_exeDir + "\\last_update_check.txt"));
+    if (out) out << NowFileTime();
+}
+static bool HttpGet(const std::string& hostIn, const std::string& pathIn, std::string& outBody) {
+    // Follows up to 5 redirects (GitHub release downloads redirect
+    // to object storage). Returns false on any network/HTTP failure.
+    std::string host = hostIn, path = pathIn;
+    outBody.clear();
+    for (int redir = 0; redir < 6; redir++) {
+        HINTERNET sess = WinHttpOpen(L"ROG Select", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!sess) return false;
+        WinHttpSetTimeouts(sess, 5000, 5000, 5000, 15000);
+        HINTERNET conn = WinHttpConnect(sess, ToWide(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        HINTERNET req = conn ? WinHttpOpenRequest(conn, L"GET", ToWide(path).c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+        bool sent = req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+        bool recv = sent && WinHttpReceiveResponse(req, nullptr);
+        DWORD status = 0; DWORD statusSize = sizeof(status);
+        if (recv) WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+        if (recv && (status == 301 || status == 302 || status == 307 || status == 308)) {
+            wchar_t loc[2048] = { 0 }; DWORD locSize = sizeof(loc);
+            bool gotLoc = WinHttpQueryHeaders(req, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &locSize, WINHTTP_NO_HEADER_INDEX);
+            if (req) WinHttpCloseHandle(req);
+            if (conn) WinHttpCloseHandle(conn);
+            if (sess) WinHttpCloseHandle(sess);
+            if (!gotLoc) return false;
+            std::string locStr = WideToUtf8(loc);
+            if (locStr.rfind("https://", 0) == 0) {
+                std::string rest = locStr.substr(8);
+                size_t slash = rest.find('/');
+                if (slash == std::string::npos) return false;
+                host = rest.substr(0, slash); path = rest.substr(slash);
+                continue;
+            } else if (!locStr.empty() && locStr[0] == '/') {
+                path = locStr; continue;
+            }
+            return false;
+        }
+        if (!recv || status != 200) {
+            if (req) WinHttpCloseHandle(req);
+            if (conn) WinHttpCloseHandle(conn);
+            if (sess) WinHttpCloseHandle(sess);
+            return false;
+        }
+        bool readOk = true;
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(req, &avail)) { readOk = false; break; }
+            if (avail == 0) break;
+            std::vector<char> buf(avail);
+            DWORD read = 0;
+            if (!WinHttpReadData(req, buf.data(), avail, &read)) { readOk = false; break; }
+            outBody.append(buf.data(), read);
+        }
+        if (req) WinHttpCloseHandle(req);
+        if (conn) WinHttpCloseHandle(conn);
+        if (sess) WinHttpCloseHandle(sess);
+        return readOk;
+    }
+    return false;
+}
+static DWORD WINAPI UpdateDownloadThread(LPVOID param) {
+    HWND hwnd = (HWND)param;
+    std::string tag = g_updateTag;
+    std::string body;
+    std::string path = "/ciaranf3308-star/rog-select/releases/download/" + tag + "/ROG-Select-Windows-x64.zip";
+    bool ok = HttpGet("github.com", path, body);
+    bool good = ok && body.size() > 1000000 && body.size() >= 2 && body[0] == 'P' && body[1] == 'K';
+    if (good) {
+        CreateDirectoryW(ToWide(g_exeDir + "\\updates").c_str(), nullptr);
+        std::string outPath = g_exeDir + "\\updates\\ROG-Select-Windows-x64.zip";
+        HANDLE h = CreateFileW(ToWide(outPath).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(h, body.data(), (DWORD)body.size(), &written, nullptr);
+            CloseHandle(h);
+            if (written != body.size()) good = false;
+        } else good = false;
+    }
+    PostMessage(hwnd, WM_UPDATE_READY, good ? 1 : 0, 0);
+    return 0;
+}
+static void CheckForUpdate() {
+    if (!g_updateCheckEnabled) { Log("Update check disabled in selector.ini"); return; }
+    if (!ShouldCheckForUpdate()) { Log("Update check skipped (checked within last 24h)"); return; }
+    std::string body;
+    if (!HttpGet("api.github.com", "/repos/ciaranf3308-star/rog-select/releases/latest", body)) {
+        Log("Update check failed (offline or GitHub unreachable), continuing with current version");
+        return;
+    }
+    size_t p = body.find("\"tag_name\"");
+    if (p == std::string::npos) { Log("Update check failed: could not parse latest release tag"); return; }
+    size_t q1 = body.find('"', p + 10);
+    if (q1 == std::string::npos) { Log("Update check failed: could not parse latest release tag"); return; }
+    size_t q2 = body.find('"', q1 + 1);
+    if (q2 == std::string::npos) { Log("Update check failed: could not parse latest release tag"); return; }
+    std::string tag = body.substr(q1 + 1, q2 - q1 - 1);
+    if (!IsNewerVersion(tag)) {
+        Log("Up to date: latest " + tag + ", running v" + kVersion);
+        MarkUpdateChecked();
+        return;
+    }
+    Log("Update available: " + tag + " (running v" + kVersion + ")");
+    MarkUpdateChecked();
+    g_updateTag = tag;
+    g_updateDownloading = true;
+    HANDLE th = CreateThread(nullptr, 0, UpdateDownloadThread, g_hwnd, 0, nullptr);
+    if (!th) { Log("Update download thread failed to start"); g_updateDownloading = false; return; }
+    CloseHandle(th);
+    Log("Downloading update " + tag + " in background...");
+}
+static bool WriteUpdateBatch() {
+    std::ofstream out(ToWide(g_exeDir + "\\update.bat"));
+    if (!out) return false;
+    out << "@echo off\nsetlocal\ncd /d \"%~dp0\"\n";
+    out << ":wait\ntasklist /FI \"IMAGENAME eq rog-select.exe\" 2>nul | find /I \"rog-select.exe\" >nul\n";
+    out << "if errorlevel 1 goto donewait\ntimeout /t 1 /nobreak >nul\ngoto wait\n:donewait\n";
+    out << "powershell -NoProfile -Command \"Expand-Archive -Force 'updates\\ROG-Select-Windows-x64.zip' 'updates\\'\"\n";
+    out << "if exist \"updates\\ROG-Select\\rog-select.exe\" (\n";
+    out << "  copy /Y \"updates\\ROG-Select\\rog-select.exe\" \"rog-select.exe\" >nul\n";
+    out << "  copy /Y \"updates\\ROG-Select\\README.md\" \"README.md\" >nul\n";
+    out << "  copy /Y \"updates\\ROG-Select\\ROG-INSTALL.md\" \"ROG-INSTALL.md\" >nul\n";
+    out << "  xcopy /Y /Q /E \"updates\\ROG-Select\\assets\" \"assets\\\" >nul\n";
+    out << "  rem selector.ini is preserved: your paths and sound mapping stay\n";
+    out << ")\n";
+    out << "rmdir /S /Q updates\n";
+    out << "start \"\" \"rog-select.exe\"\n";
+    return true;
+}
+static void StartUpdateInstall() {
+    if (!g_updateReady) return;
+    g_updateReady = false;
+    if (!WriteUpdateBatch()) {
+        Log("Update install failed: could not write update.bat");
+        g_status = "Update install failed. See rog-select.log.";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    std::wstring cmd = L"cmd /c \"" + ToWide(g_exeDir + "\\update.bat") + L"\"";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(L'\0');
+    STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi = {};
+    std::wstring dir = ToWide(g_exeDir);
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi)) {
+        Log("Update install failed: could not launch update.bat");
+        g_status = "Update install failed. See rog-select.log.";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    Log("Update install started for " + g_updateTag + ", quitting so update.bat can replace files and relaunch");
+    g_status = "Installing update, restarting...";
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+    PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+}
+static void DismissUpdate() {
+    g_updateReady = false;
+    g_status.clear();
+    Log("Update dismissed for this session");
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
 static void PlayMp3(const std::string& relFile) {
     if (!g_soundEnabled) return;
     std::string full = JoinExe(relFile);
@@ -228,8 +457,18 @@ static void LoadConfig() {
     get("general", "background", g_backgroundFile);
     get("general", "sound_navigate", g_navigateFile);
     get("general", "sound_select", g_selectFile);
+    // v1.0.7 migration: an old selector.ini explicitly carries the
+    // original (reversed) mapping. Swap it at load time so an update
+    // that preserves selector.ini still fixes the sounds. Only the
+    // exact old defaults migrate; a custom sound file is left alone.
+    if (g_navigateFile == "assets\\navigate.mp3" && g_selectFile == "assets\\select.mp3") {
+        g_navigateFile = "assets\\select.mp3";
+        g_selectFile = "assets\\navigate.mp3";
+        Log("Sound mapping migrated to v1.0.7: clang on move, swoosh on select");
+    }
     { std::string v; get("general", "default_focus", v); if (!v.empty()) { int f = atoi(v.c_str()); if (f >= 0 && f <= 3) g_focus = f; } }
     { std::string v; get("general", "sound", v); if (Lower(v) == "off" || v == "0") g_soundEnabled = false; }
+    { std::string v; get("general", "update_check", v); if (Lower(v) == "off" || v == "0") g_updateCheckEnabled = false; }
     { std::string v; get("general", "exit_on_launch", v); if (Lower(v) == "on" || v == "1" || Lower(v) == "true") g_exitOnLaunch = true; }
     for (auto& en : g_entries) {
         get(en.id, "label", en.label);
@@ -708,6 +947,8 @@ static void PollController() {
         if (pressed & XINPUT_GAMEPAD_DPAD_UP) { Log("Controller slot " + std::to_string(slot) + ": D-pad up"); SetFocusIndex(g_focus - 1, true); }
         if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) { Log("Controller slot " + std::to_string(slot) + ": D-pad down"); SetFocusIndex(g_focus + 1, true); }
         if (pressed & XINPUT_GAMEPAD_A) { Log("Controller slot " + std::to_string(slot) + ": A (launch)"); LaunchEntry(g_focus); }
+        if (g_updateReady && (pressed & XINPUT_GAMEPAD_X)) { Log("Controller slot " + std::to_string(slot) + ": X (install update)"); StartUpdateInstall(); return; }
+        if (g_updateReady && (pressed & XINPUT_GAMEPAD_B)) { Log("Controller slot " + std::to_string(slot) + ": B (dismiss update)"); DismissUpdate(); }
         // Left stick: edge + held repeat (400 ms initial, 300 ms repeat), per slot.
         SHORT tx = st.Gamepad.sThumbLX;
         int dir = 0;
@@ -742,8 +983,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // selector has no timer wake-ups at all.
         if (wParam) StartControllerTimer(hwnd); else StopControllerTimer();
         return 0;
+    case WM_UPDATE_READY:
+        g_updateDownloading = false;
+        if (wParam == 1) {
+            g_updateReady = true;
+            g_status = "Update " + g_updateTag + " ready - press X (or U) to install and restart, B/Esc to dismiss.";
+            Log("Update ready: " + g_updateTag + " downloaded, press X/U to install, B/Esc to dismiss");
+        } else {
+            Log("Update download failed, continuing with current version");
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
     case WM_TIMER:
         if (wParam == TIMER_CONTROLLER) PollController();
+        if (wParam == TIMER_UPDATE) {
+            KillTimer(hwnd, TIMER_UPDATE);
+            // Do not check/download while a game is foreground: if the
+            // selector is hidden, wait 5 s and try again (one-shot).
+            if (!IsWindowVisible(hwnd)) { SetTimer(hwnd, TIMER_UPDATE, 5000, nullptr); return 0; }
+            CheckForUpdate();
+            return 0;
+        }
         if (wParam == TIMER_TRANSITION) {
             // Bounded desktop-transition poll. Success: FSE INACTIVE.
             // Failure: timeout (10 s) or status unavailable. Either way
@@ -795,11 +1055,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_ERASEBKGND: return 1;
     case WM_KEYDOWN:
+        if (g_updateReady && wParam == 'U') { StartUpdateInstall(); return 0; }
         switch (wParam) {
         case VK_LEFT: case VK_UP: SetFocusIndex(g_focus - 1, true); return 0;
         case VK_RIGHT: case VK_DOWN: SetFocusIndex(g_focus + 1, true); return 0;
         case VK_RETURN: case VK_SPACE: LaunchEntry(g_focus); return 0;
-        case VK_ESCAPE: return 0; // Never quit to desktop by accident.
+        case VK_ESCAPE:
+            if (g_updateReady) { DismissUpdate(); return 0; }
+            return 0; // Never quit to desktop by accident.
         case '1': case '2': case '3': case '4': SetFocusIndex((int)(wParam - '1'), true); return 0;
         }
         return 0;
@@ -838,6 +1101,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
         StopControllerTimer();
         KillTimer(hwnd, TIMER_TRANSITION);
+        KillTimer(hwnd, TIMER_UPDATE);
         g_desktopTransition = false;
         mciSendStringW(L"close rogselect_sound", nullptr, 0, nullptr);
         DiscardDeviceResources();
@@ -890,7 +1154,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         if (g_configPath.size() >= 2 && g_configPath.front() == '"' && g_configPath.back() == '"')
             g_configPath = g_configPath.substr(1, g_configPath.size() - 2);
     }
-    Log("ROG Select starting");
+    Log("ROG Select v" + kVersion + " starting");
     LoadConfig();
     LogFseState("startup");
     // Single instance: a second launch shows the existing window.
@@ -925,6 +1189,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // a silently unpolled controller. Start is idempotent.
     StartControllerTimer(g_hwnd);
     if (!g_timerActive) Log("WARNING: controller timer is NOT active after window open - controller input will not work, see log above");
+    // Update check: one-shot, 2 s after open, at most once per 24 h
+    // (see CheckForUpdate). It never blocks the selector on failure.
+    SetTimer(g_hwnd, TIMER_UPDATE, 2000, nullptr);
     // Blocking message loop: effectively zero CPU when idle. The 80 ms
     // controller timer is the only wake-up, and painting happens only on
     // focus change, resize, launch, or return.

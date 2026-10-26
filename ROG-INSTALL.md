@@ -1,6 +1,14 @@
 # ROG-INSTALL — on-device steps for Codex (ROG Xbox Ally X)
 
-ROG Select v1.0.6 is a four-button checkpoint: boot, choose Windows / Emulation / Xbox / Steam, play. **For v1.0.6, do ONLY the controller-only verification below. Do not run another device-wide testing cycle, and do not attempt AnyFSE.** Every other v1.0.5 feature is unchanged, especially the proven Windows-switch implementation.
+ROG Select v1.0.7 is a four-button checkpoint: boot, choose Windows / Emulation / Xbox / Steam, play. **For v1.0.7, do ONLY the short verification below. Do not run another device-wide testing cycle, and do not attempt AnyFSE.** Every other v1.0.6 feature is unchanged, especially the proven Windows-switch implementation and controller handling.
+
+## v1.0.7 verification — sounds + update check only, about 5 minutes, windowed only
+
+1. Unzip v1.0.7 to a folder (keep your old folder if you want to compare). Do not overwrite your existing `selector.ini` yet — test the fresh ZIP first, then your own folder.
+2. Run `rog-select.exe --windowed`. Move focus with D-pad: you must hear the metallic clang on move. Press A: you must hear the gentle swoosh on select. If you hear the reverse, stop and send `rog-select.log` — the v1.0.7 migration should have fixed old configs, and the fresh ZIP's `selector.ini` already has the swapped lines.
+3. Leave the selector open for a few seconds, then check `rog-select.log`. It must contain either "Up to date: latest v1.0.7" (v1.0.7 is the latest release, so no update prompt should appear) or "Update check failed (offline…)" if you have no network. It must NOT show an "Update ready" prompt, and startup must not have been noticeably delayed by the check.
+4. Optional, no new release needed: set `update_check=off` in `selector.ini`, relaunch, and confirm the log says "Update check disabled" and no network check runs. Set it back to `on` afterwards.
+5. **Updater install path — cannot be tested yet, and that is expected.** There is no release newer than v1.0.7, so there is nothing for v1.0.7 to download or install. Do not fake a newer release to test it. When v1.0.8 (or later) is published, the install test is: launch v1.0.7, wait for "Update ready - press X (or U) to install and restart", press X, confirm the selector restarts as the new version, confirm `selector.ini` still has your ES-DE path (it must be preserved, not overwritten), and confirm move/select sounds are still clang/swoosh. Until that test happens, the install path is code-reviewed and compile-verified only — it is NOT claimed as verified.
 
 ## Controller-only verification (v1.0.6) — about 5 minutes, windowed only
 
@@ -33,9 +41,9 @@ Xbox Mode background-process suppression and RAM benefit with ROG Select as home
 3. Record: free/available RAM (Task Manager > Performance > Memory), top background processes by RAM, and whether `explorer.exe` is running. This is the **stock baseline** — every later comparison uses it, under the same idle conditions.
 4. Note Armoury Crate / Command Center behaviour and the current performance mode.
 
-## Step 1 — Get v1.0.6 and configure it
+## Step 1 — Get v1.0.7 and configure it
 
-1. Download the v1.0.6 portable ZIP from the GitHub release (see README) and unzip it to a folder, e.g. `C:\Users\<you>\ROG-Select\`.
+1. Download the v1.0.7 portable ZIP from the GitHub release (see README) and unzip it to a folder, e.g. `C:\Users\<you>\ROG-Select\`.
 2. Check the folder contains: `rog-select.exe`, `selector.ini`, `README.md`, `ROG-INSTALL.md`, and `assets/` with `background.png`, `windows.png`, `emulation.png`, `xbox.png`, `steam.png`, `navigate.mp3`, `select.mp3`.
 3. Edit `selector.ini` (Notepad is fine):
    - `[emulation] path=` — put the exact path to ES-DE (the emulation frontend for this test). Leave it blank and the button will show an error instead of guessing — that is by design.
