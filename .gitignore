@@ -1,0 +1,7 @@
+rog-select.exe
+rog-select.log
+rog-select.old.log
+dist/
+*.obj
+*.pdb
+*.ilk

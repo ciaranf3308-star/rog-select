@@ -1,0 +1,59 @@
+name: Build ROG Select (Windows x64 Release)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile (MSVC, no dependencies to download)
+        shell: cmd
+        run: |
+          cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE src\main.cpp /link d2d1.lib windowscodecs.lib dwrite.lib Xinput.lib winmm.lib user32.lib gdi32.lib shell32.lib /OUT:rog-select.exe
+
+      - name: Stage portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\ROG-Select | Out-Null
+          Copy-Item rog-select.exe dist\ROG-Select\
+          Copy-Item selector.ini dist\ROG-Select\
+          Copy-Item README.md dist\ROG-Select\
+          Copy-Item ROG-INSTALL.md dist\ROG-Select\
+          New-Item -ItemType Directory -Force -Path dist\ROG-Select\assets | Out-Null
+          Copy-Item assets\background.png,assets\windows.png,assets\emulation.png,assets\xbox.png,assets\steam.png,assets\navigate.mp3,assets\select.mp3 dist\ROG-Select\assets\
+          Get-ChildItem -Recurse dist\ROG-Select | Select-Object FullName,Length
+
+      - name: Make portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist\ROG-Select -DestinationPath ROG-Select-Windows-x64.zip -Force
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ROG-Select-Windows-x64
+          path: ROG-Select-Windows-x64.zip
+
+      - name: Publish GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ROG-Select-Windows-x64.zip
+          body: |
+            ROG Select - portable Windows x64 build.
+            Unzip anywhere, edit selector.ini (especially the Emulation path),
+            then run rog-select.exe. Test windowed first: rog-select.exe --windowed
+            See README.md for installation, configuration and rollback, and
+            ROG-INSTALL.md for on-device steps. Xbox Mode / Gaming Home
+            integration is UNVERIFIED on real hardware - see README.md.
