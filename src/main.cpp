@@ -81,6 +81,7 @@ static std::string Lower(std::string s) {
     for (char& c : s) c = (char)tolower((unsigned char)c);
     return s;
 }
+static std::wstring ToWide(const std::string& s); // Defined below, used by FileExists.
 static bool FileExists(const std::string& p) {
     // Unicode (W) file API, so a non-ASCII exe/user path does not fail
     // the check while the WIC loader (also W) would have succeeded.
