@@ -1,4 +1,4 @@
-// ROG Select 1.0.4 - lightweight native Windows boot selector
+// ROG Select 1.0.6 - lightweight native Windows boot selector
 // Win32 + Direct2D + WIC + DirectWrite + XInput + MCI (MP3).
 // No Electron, browser, Python, web server, service, telemetry,
 // library scanning, auto-update, shell replacement, or DLL injection.
@@ -47,7 +47,11 @@ static bool g_exitOnLaunch = false; // Test flag only, default off (see selector
 static bool g_timerActive = false;
 static bool g_desktopTransition = false; // Win+F11 sent, waiting for INACTIVE.
 static int g_transitionTicks = 0;
-static int g_activeController = -1; // XInput slot currently driving navigation.
+// v1.0.6 controller state is per-slot, not "first slot wins". See PollController.
+static bool g_slotConnected[4] = { false, false, false, false };
+static WORD g_slotPrevButtons[4] = { 0, 0, 0, 0 };
+static SHORT g_slotPrevThumbX[4] = { 0, 0, 0, 0 };
+static ULONGLONG g_slotLastThumbMove[4] = { 0, 0, 0, 0 };
 
 static ID2D1Factory* g_factory = nullptr;
 static ID2D1HwndRenderTarget* g_target = nullptr;
@@ -425,17 +429,49 @@ static void SetFocusIndex(int idx, bool playSound) {
 // hidden selector costs no timer wake-ups at all. The message loop
 // already blocks, so with the timer stopped the hidden process is
 // idle (no CPU, no painting, no polling) until it is shown again.
-static void StartControllerTimer() {
-    if (g_hwnd && !g_timerActive) {
-        SetTimer(g_hwnd, TIMER_CONTROLLER, 80, nullptr);
-        g_timerActive = true;
+// v1.0.6 timer lifecycle fix: the old StartControllerTimer() read
+// g_hwnd, but WM_CREATE fires during CreateWindowExW, before WinMain
+// assigns g_hwnd — so the WM_CREATE start was dead code and polling
+// silently depended on WM_SHOWWINDOW rescuing it. The new version
+// takes the HWND it is given (WM_CREATE's hwnd, or g_hwnd after
+// creation), checks SetTimer's return, and logs success or failure,
+// so a timer that never starts is visible in rog-select.log instead
+// of looking like a dead controller.
+static void LogControllerScan();
+static void StartControllerTimer(HWND hwnd) {
+    if (!hwnd) hwnd = g_hwnd;
+    if (!hwnd || g_timerActive) return;
+    UINT_PTR r = SetTimer(hwnd, TIMER_CONTROLLER, 80, nullptr);
+    if (r == 0) {
+        Log("Controller timer FAILED to start (SetTimer returned 0) - controller polling will not run");
+        return;
     }
+    g_timerActive = true;
+    Log("Controller timer started (80 ms)");
+    LogControllerScan();
 }
 static void StopControllerTimer() {
     if (g_hwnd && g_timerActive) {
         KillTimer(g_hwnd, TIMER_CONTROLLER);
         g_timerActive = false;
     }
+}
+// One-line scan, logged on timer start and on connect/disconnect
+// only — never per poll, so the log stays readable. This is the
+// diagnostic that distinguishes the three failure modes: timer
+// never started, no controller seen by XInput, or controller seen
+// but no button activity received.
+static void LogControllerScan() {
+    std::string s = "Controller scan:";
+    bool any = false;
+    for (int i = 0; i < 4; i++) {
+        XINPUT_STATE cand = {};
+        bool ok = XInputGetState(i, &cand) == ERROR_SUCCESS;
+        if (ok) any = true;
+        s += " slot" + std::to_string(i) + "=" + (ok ? "connected" : "empty");
+    }
+    if (!any) s += " - no XInput controller detected";
+    Log(s);
 }
 static void HideSelectorOnly() {
     StopControllerTimer();
@@ -615,59 +651,96 @@ static void LaunchEntry(int idx) {
 }
 
 // ---------- window ----------
-static WORD g_prevButtons = 0;
-static SHORT g_prevThumbX = 0;
-static ULONGLONG g_lastThumbMove = 0;
 static void PollController() {
-    // v1.0.4: scan slots 0-3 instead of assuming slot 0, and support
-    // reconnection. The first connected slot wins. If the active slot
-    // disconnects, or a different slot becomes active, the next poll
-    // only records that controller's state (no phantom A/D-pad press
-    // from a newly connected pad whose buttons are already held).
-    XINPUT_STATE st = {};
-    int slot = -1;
-    for (int i = 0; i < 4; i++) {
-        XINPUT_STATE cand = {};
-        if (XInputGetState(i, &cand) == ERROR_SUCCESS) { slot = i; st = cand; break; }
-    }
-    if (slot < 0) { g_activeController = -1; g_prevButtons = 0; g_prevThumbX = 0; return; }
-    if (slot != g_activeController) {
-        g_activeController = slot;
-        g_prevButtons = st.Gamepad.wButtons;
-        g_prevThumbX = st.Gamepad.sThumbLX;
-        Log("Controller active on XInput slot " + std::to_string(slot));
-        return;
-    }
-    WORD pressed = (WORD)(st.Gamepad.wButtons & ~g_prevButtons);
-    if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) SetFocusIndex(g_focus - 1, true);
-    if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) SetFocusIndex(g_focus + 1, true);
-    if (pressed & XINPUT_GAMEPAD_DPAD_UP) SetFocusIndex(g_focus - 1, true);
-    if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) SetFocusIndex(g_focus + 1, true);
-    if (pressed & XINPUT_GAMEPAD_A) LaunchEntry(g_focus);
-    // Left stick: edge + held repeat (400 ms initial, 300 ms repeat).
-    SHORT tx = st.Gamepad.sThumbLX;
-    int dir = 0;
-    if (tx < -16000) dir = -1; else if (tx > 16000) dir = 1;
-    ULONGLONG now = GetTickCount64();
-    if (dir != 0 && (dir != (g_prevThumbX < -16000 ? -1 : (g_prevThumbX > 16000 ? 1 : 0)) || now - g_lastThumbMove >= 300)) {
-        if (dir != (g_prevThumbX < -16000 ? -1 : (g_prevThumbX > 16000 ? 1 : 0)) || now - g_lastThumbMove >= 400) {
-            SetFocusIndex(g_focus + dir, true);
-            g_lastThumbMove = now;
+    // v1.0.6 controller rewrite — three real weaknesses in v1.0.5,
+    // not just "slot selection":
+    // 1) First-slot-wins: the loop broke on the first connected slot,
+    //    so an idle virtual controller (e.g. a Steam Input virtual
+    //    pad, or a leftover external pad) occupying slot 0 locked
+    //    out the built-in controller on slot 1+ forever, even while
+    //    the user was pressing the built-in pad. Idle slots must not
+    //    block an actively used slot.
+    // 2) Single shared prev state: there was one g_prevButtons for
+    //    whichever slot happened to be "active", so a slot change
+    //    could misread held buttons as new presses, and the slot-
+    //    change poll swallowed a whole poll for the new pad.
+    // 3) No diagnostics and a fragile timer start (see
+    //    StartControllerTimer): a dead timer, no controller, and
+    //    controller-with-no-activity all looked identical — silence.
+    // Fix: poll ALL four slots every 80 ms, with per-slot prev
+    // state. A slot only acts when its own buttons change (pressed
+    // edge) or its own stick moves, so whichever controller the user
+    // is actually holding drives navigation, and idle slots are
+    // harmless. A newly connected slot records its state and does
+    // not act on that poll (no phantom press from buttons already
+    // held at connect/reconnect); other slots still act that poll.
+    // Disconnection clears that slot's state, so reconnection starts
+    // clean. Button activity is logged per slot (D-pad/A only, plus
+    // stick direction changes — not stick repeats, to keep the log
+    // readable). No GameInput fallback: the built-in Ally X pad is
+    // an Xbox/XInput pad, and GameInput would not fix first-slot
+    // blocking, a dead timer, or Armoury Crate Desktop mode (see
+    // README/ROG-INSTALL), while adding a WinRT dependency for no
+    // evidenced benefit.
+    for (int slot = 0; slot < 4; slot++) {
+        XINPUT_STATE st = {};
+        bool ok = XInputGetState(slot, &st) == ERROR_SUCCESS;
+        if (!ok) {
+            if (g_slotConnected[slot]) {
+                g_slotConnected[slot] = false;
+                g_slotPrevButtons[slot] = 0;
+                g_slotPrevThumbX[slot] = 0;
+                Log("Controller disconnected slot " + std::to_string(slot));
+            }
+            continue;
         }
+        if (!g_slotConnected[slot]) {
+            g_slotConnected[slot] = true;
+            g_slotPrevButtons[slot] = st.Gamepad.wButtons;
+            g_slotPrevThumbX[slot] = st.Gamepad.sThumbLX;
+            g_slotLastThumbMove[slot] = GetTickCount64();
+            Log("Controller connected slot " + std::to_string(slot) + " (state recorded, no action this poll)");
+            continue;
+        }
+        WORD pressed = (WORD)(st.Gamepad.wButtons & ~g_slotPrevButtons[slot]);
+        if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) { Log("Controller slot " + std::to_string(slot) + ": D-pad left"); SetFocusIndex(g_focus - 1, true); }
+        if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) { Log("Controller slot " + std::to_string(slot) + ": D-pad right"); SetFocusIndex(g_focus + 1, true); }
+        if (pressed & XINPUT_GAMEPAD_DPAD_UP) { Log("Controller slot " + std::to_string(slot) + ": D-pad up"); SetFocusIndex(g_focus - 1, true); }
+        if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) { Log("Controller slot " + std::to_string(slot) + ": D-pad down"); SetFocusIndex(g_focus + 1, true); }
+        if (pressed & XINPUT_GAMEPAD_A) { Log("Controller slot " + std::to_string(slot) + ": A (launch)"); LaunchEntry(g_focus); }
+        // Left stick: edge + held repeat (400 ms initial, 300 ms repeat), per slot.
+        SHORT tx = st.Gamepad.sThumbLX;
+        int dir = 0;
+        if (tx < -16000) dir = -1; else if (tx > 16000) dir = 1;
+        int prevDir = (g_slotPrevThumbX[slot] < -16000 ? -1 : (g_slotPrevThumbX[slot] > 16000 ? 1 : 0));
+        ULONGLONG now = GetTickCount64();
+        if (dir != 0 && (dir != prevDir || now - g_slotLastThumbMove[slot] >= 300)) {
+            if (dir != prevDir || now - g_slotLastThumbMove[slot] >= 400) {
+                if (dir != prevDir) Log("Controller slot " + std::to_string(slot) + ": left stick " + (dir < 0 ? "left" : "right"));
+                SetFocusIndex(g_focus + dir, true);
+                g_slotLastThumbMove[slot] = now;
+            }
+        }
+        g_slotPrevButtons[slot] = st.Gamepad.wButtons;
+        g_slotPrevThumbX[slot] = tx;
+        // If a launch hid the selector, polling stops via WM_SHOWWINDOW;
+        // do not keep processing later slots into a hidden window.
+        if (!g_timerActive) break;
     }
-    g_prevButtons = st.Gamepad.wButtons;
-    g_prevThumbX = tx;
 }
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        StartControllerTimer();
+        // v1.0.6: pass hwnd explicitly and record it now, so the timer
+        // does not depend on WinMain's later g_hwnd assignment.
+        g_hwnd = hwnd;
+        StartControllerTimer(hwnd);
         return 0;
     case WM_SHOWWINDOW:
         // ShowWindow(SW_HIDE) / SW_SHOW both arrive here. Stop polling
         // on hide, resume on show. This is the v1.0.3 idle fix: a hidden
         // selector has no timer wake-ups at all.
-        if (wParam) StartControllerTimer(); else StopControllerTimer();
+        if (wParam) StartControllerTimer(hwnd); else StopControllerTimer();
         return 0;
     case WM_TIMER:
         if (wParam == TIMER_CONTROLLER) PollController();
@@ -758,7 +831,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_SHOW_SELECTOR:
         ShowWindow(hwnd, SW_SHOW);
-        StartControllerTimer();
+        StartControllerTimer(hwnd);
         SetForegroundWindow(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -847,6 +920,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     SetWindowTextW(g_hwnd, L"ROG Select");
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
+    // Belt-and-braces: WM_CREATE already started the timer, but if
+    // that path ever failed, this logs the failure instead of leaving
+    // a silently unpolled controller. Start is idempotent.
+    StartControllerTimer(g_hwnd);
+    if (!g_timerActive) Log("WARNING: controller timer is NOT active after window open - controller input will not work, see log above");
     // Blocking message loop: effectively zero CPU when idle. The 80 ms
     // controller timer is the only wake-up, and painting happens only on
     // focus change, resize, launch, or return.

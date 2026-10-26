@@ -1,6 +1,18 @@
 # ROG-INSTALL — on-device steps for Codex (ROG Xbox Ally X)
 
-ROG Select v1.0.4 is a four-button checkpoint: boot, choose Windows / Emulation / Xbox / Steam, play. **This test must verify the Windows card, scaling, controller, touch, audio, ES-DE, Steam, and Xbox before attempting AnyFSE integration.** Do not attempt Step 3 (AnyFSE) until every item in Step 2 passes. Test the standalone EXE first, before changing Xbox Mode at all.
+ROG Select v1.0.6 is a four-button checkpoint: boot, choose Windows / Emulation / Xbox / Steam, play. **For v1.0.6, do ONLY the controller-only verification below. Do not run another device-wide testing cycle, and do not attempt AnyFSE.** Every other v1.0.5 feature is unchanged, especially the proven Windows-switch implementation.
+
+## Controller-only verification (v1.0.6) — about 5 minutes, windowed only
+
+1. Close Steam if it is running (Steam Input can create a virtual XInput pad that occupied slot 0 in v1.0.5 — closing it removes that variable for this test; note in the report whether Steam was running).
+2. Open Command Center and note the Control Mode shown (Auto / Gamepad / Desktop). Do not change it yet, and do not remap anything.
+3. Unzip v1.0.6 to a folder, run `rog-select.exe --windowed`, do not change `selector.ini` except leaving `exit_on_launch=off`.
+4. Press D-pad left/right: focus must move and swoosh must play. Press A on Emulation (or any card): it must launch (or show the configured-path error if ES-DE is not set — that still proves A worked). If focus does not move, stop and collect the log in step 7 — do not keep pressing.
+5. Disconnect/reconnect test: turn the controller off / disconnect it, turn it back on / reconnect it, then press D-pad again without restarting ROG Select. Focus must move again, with no launch happening on reconnect itself.
+6. If D-pad still does nothing in the mode noted in step 2, set Control Mode to Gamepad in Command Center (a manual Armoury Crate action, not a change made by ROG Select), relaunch `rog-select.exe --windowed`, and repeat step 4. Record whether Gamepad mode fixed it — that tells us whether Auto was putting ROG Select in Desktop mode (mouse/keyboard emulation) instead of XInput.
+7. **If it still fails, collect exactly this and send it, nothing else needed:** the full `rog-select.log` file beside `rog-select.exe`, plus these four facts: (a) Control Mode shown in Command Center, (b) whether Steam was running, (c) whether any other controller/pad was connected, (d) whether touch/mouse still worked (they prove the selector itself was alive). The log will show one of three lines, which is the diagnosis: no "Controller timer started" line = timer never started; "Controller scan: … no XInput controller detected" = XInput saw no pad; "Controller scan: slotX=connected" with no "Controller slot X: D-pad…" lines after pressing = pad seen but button activity not received.
+
+For the full test (Windows, scaling, touch, audio, ES-DE, Steam, Xbox before AnyFSE), see Step 2 below — that cycle is NOT required for v1.0.6, and Step 3 (AnyFSE) must not be attempted until Step 2 passes in full on a later release.
 
 ## Hard rules — do not break these to make a test pass
 
@@ -21,9 +33,9 @@ Xbox Mode background-process suppression and RAM benefit with ROG Select as home
 3. Record: free/available RAM (Task Manager > Performance > Memory), top background processes by RAM, and whether `explorer.exe` is running. This is the **stock baseline** — every later comparison uses it, under the same idle conditions.
 4. Note Armoury Crate / Command Center behaviour and the current performance mode.
 
-## Step 1 — Get v1.0.4 and configure it
+## Step 1 — Get v1.0.6 and configure it
 
-1. Download the v1.0.4 portable ZIP from the GitHub release (see README) and unzip it to a folder, e.g. `C:\Users\<you>\ROG-Select\`.
+1. Download the v1.0.6 portable ZIP from the GitHub release (see README) and unzip it to a folder, e.g. `C:\Users\<you>\ROG-Select\`.
 2. Check the folder contains: `rog-select.exe`, `selector.ini`, `README.md`, `ROG-INSTALL.md`, and `assets/` with `background.png`, `windows.png`, `emulation.png`, `xbox.png`, `steam.png`, `navigate.mp3`, `select.mp3`.
 3. Edit `selector.ini` (Notepad is fine):
    - `[emulation] path=` — put the exact path to ES-DE (the emulation frontend for this test). Leave it blank and the button will show an error instead of guessing — that is by design.
